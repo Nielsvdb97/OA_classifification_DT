@@ -1,0 +1,139 @@
+---
+title: "digital_twins_script"
+output: html_document
+date: "2023-07-07"
+---
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(STRINGdb)
+library(igraph)
+string_db <- STRINGdb$new( version="11.5", species=9606, score_threshold=400, network_type="full", input_directory="")
+```
+
+
+```{r}
+clust_proteins <- read.csv('/Users/niels/Documents/Uni/Stage/digital_twins/cluster_proteins.csv')
+clust_proteins <- clust_proteins[, 1]
+
+fold_data <- readxl::read_xlsx('/Users/niels/Documents/Uni/Stage/digital_twins/fold_data.xlsx') %>%
+  select(c(-1, )) %>%
+  filter(!row_number() %in% c(247, 248, 249)) %>%
+  column_to_rownames(var = "Gene name") %>%
+  separate(col = "late_vs_ctrl_95%CI", sep = "-", into = c("late_vs_ctrl_95%CI_low", "late_vs_ctrl_95%CI_high")) %>%
+  separate(col = "early_vs_ctrl_95%CI", sep = "-", into = c("early_vs_ctrl_95%CI_low", "early_vs_ctrl_95%CI_high")) %>%
+  separate(col = "late_vs_early_95%CI", sep = "-", into = c("late_vs_early_95%CI_low", "late_vs_early_95%CI_high")) %>%
+  mutate(across(2:8, ~as.numeric(gsub(",", ".", .)))) %>%
+  mutate(across(2:8, log2))
+
+lund_data <- read.csv("/Users/niels/Documents/Uni/Stage/digital_twins/lund_missfor")
+
+sig <- c()
+i <- 0
+proteins <- c(fold_data$`Protein AC`)
+
+for (i in 1:length(rownames(fold_data))) {
+  early <- fold_data$early_vs_ctrl_mean[i]
+  late <- fold_data$late_vs_ctrl_mean[i]
+  protein <- proteins[i]
+  i <- i +1
+  if (early >= 1.8 || early <= -1.8) { #Why is the threshold 1.8 when the article clearly states 2?
+    sig <- c(sig, protein)
+  }
+  
+  else if (late >= 1.8 || late <= -1.8) {
+    sig <- c(sig, protein)
+  }
+}
+print(sig) %>% cat(sep="\n")
+
+# intersect(x = sig, c("GPX3", "HRG", "POSTN", "DCD", "ZHX3", "IBP3", "MYLK", "APOF", "FA5", "GMFB", "CO1A1"))
+```
+
+#### Ensembl
+
+```{r}
+string_db <- STRINGdb$new( version="11.5", species=9606, score_threshold=400, network_type="full", input_directory="")
+
+cluster_ensembl <- c()
+
+for (i in seq_along(clust_proteins)) {
+  string_map <- string_db$mp(clust_proteins[i])
+  cluster_ensembl <- c(cluster_ensembl, string_map)
+}
+
+new_vectors <- vector("list", length(sig))
+
+for (i in seq_along(sig)) {
+  new_vector <- paste("neighbors_", sig[i], sep = "") 
+  protein <- sig[i]
+  string_map <- string_db$mp(sig[i])
+  neighbours <- string_db$get_neighbors(string_map)
+  intersect_neighbours <- intersect(c(string_map, neighbours), cluster_ensembl)
+  assign(new_vector, intersect_neighbours)
+  new_vectors[[i]] <- new_vector
+}
+
+
+new_vec2 <- lapply (seq_along(sig), function(i) {
+  string_map <- string_db$mp(sig[i])
+  neighbours <- string_db$get_neighbors(string_map)
+  intersect_neighbours <- intersect(c(string_map, neighbours), cluster_ensembl)
+  return(intersect_neighbours)
+})
+names(new_vec2) <- sig
+
+clust_vec2 <- lapply(unique(unlist(new_vec2)), function(clust_id){
+  outp <- sapply(seq_along(new_vec2), function(clust_ii){
+    if(clust_id %in% new_vec2[[clust_ii]]) return(sig[clust_ii]) else NA
+  })
+  return(c(na.omit(outp)))
+})
+names(clust_vec2) <- unique(unlist(new_vec2))
+
+
+str_names <- c(names(clust_vec2)[2], clust_vec2[[2]])
+string_map <- string_db$mp(str_names)
+str_intr <- string_db$get_subnetwork(string_map)
+E(str_intr)$combined_score %<>% divide_by(2000)
+str_nw <- as_adj(str_intr, attr = "combined_score")
+ 
+betas <- str_nw[string_map[-1], string_map[1]]
+# if(any(!is.finite(betas))) break
+
+### Y <- scale(X %*% orth(betas))
+
+```
+
+#### Lineair model
+
+```{r}
+betas_list <- list()
+
+# Iterate over each item in clust_vec2
+for (i in 1:length(clust_vec2)) {
+  str_names <- c(names(clust_vec2)[i], clust_vec2[[i]])
+  string_map <- string_db$mp(str_names)
+  
+  if (length(unique(str_map)) < length(str_map)) {
+    cat("Duplicate item", i)
+    next
+  }
+  
+  str_intr <- string_db$get_subnetwork(string_map)
+  E(str_intr)$combined_score %<>% divide_by(2000)
+  str_nw <- as_adj(str_intr, attr = "combined_score")
+  
+  betas <- str_nw[string_map[-1], string_map[1]]
+
+  betas_list[[i]] <- betas
+}
+
+# biomarker is normaal verdeeld met gem en std. Gem? Std? 
+
+# Map data protein to 
+
+
+```
+
