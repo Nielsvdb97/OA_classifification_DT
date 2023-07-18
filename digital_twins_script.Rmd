@@ -9,6 +9,11 @@ library(tidyverse)
 library(magrittr)
 library(STRINGdb)
 library(igraph)
+library(UniProt.ws)
+library(readxl)
+library(dplyr)
+install.packages("tidyverse")
+up <- UniProt.ws(UniProt.version = "uniprot", use.cache = TRUE)
 string_db <- STRINGdb$new( version="11.5", species=9606, score_threshold=400, network_type="full", input_directory="")
 ```
 
@@ -26,8 +31,6 @@ fold_data <- readxl::read_xlsx('/Users/niels/Documents/Uni/Stage/digital_twins/f
   separate(col = "late_vs_early_95%CI", sep = "-", into = c("late_vs_early_95%CI_low", "late_vs_early_95%CI_high")) %>%
   mutate(across(2:8, ~as.numeric(gsub(",", ".", .)))) %>%
   mutate(across(2:8, log2))
-
-lund_data <- read.csv("/Users/niels/Documents/Uni/Stage/digital_twins/lund_missfor")
 
 sig <- c()
 i <- 0
@@ -111,29 +114,95 @@ betas <- str_nw[string_map[-1], string_map[1]]
 ```{r}
 betas_list <- list()
 
-# Iterate over each item in clust_vec2
 for (i in 1:length(clust_vec2)) {
   str_names <- c(names(clust_vec2)[i], clust_vec2[[i]])
   string_map <- string_db$mp(str_names)
-  
-  if (length(unique(str_map)) < length(str_map)) {
-    cat("Duplicate item", i)
-    next
-  }
   
   str_intr <- string_db$get_subnetwork(string_map)
   E(str_intr)$combined_score %<>% divide_by(2000)
   str_nw <- as_adj(str_intr, attr = "combined_score")
   
   betas <- str_nw[string_map[-1], string_map[1]]
-
+  
+    if (length(betas) == 1) {
+    # Create a named numeric vector with the protein name
+    betas <- setNames(betas, names(clust_vec2)[i])
+  }
+  
   betas_list[[i]] <- betas
+  
+  names(betas_list2[[i]]) <- sapply(names(betas_list2[[i]]), convert_ensembl_to_uniprot)
 }
 
-# biomarker is normaal verdeeld met gem en std. Gem? Std? 
+names(betas_list) <- names(clust_vec2)
+names(betas_list) <- sapply(names(clust_vec2), convert_ensembl_to_uniprot)
 
-# Map data protein to 
+```
 
 
+
+```{r}
+betas_list2 <- betas_list
+betas_list <- list()
+
+
+  str_names <- c(names(clust_vec2)[3], clust_vec2[[3]])
+  string_map <- string_db$mp(str_names)
+  
+  str_intr <- string_db$get_subnetwork(string_map)
+  E(str_intr)$combined_score %<>% divide_by(2000)
+  str_nw <- as_adj(str_intr, attr = "combined_score")
+  
+  betas <- str_nw[string_map[-1], string_map[1]]
+  
+  if (length(betas) == 1) {
+    # Create a named numeric vector with the protein name
+    betas <- setNames(betas, names(clust_vec2)[3])
+  }
+  
+  betas_list2[[3]] <- betas
+names(betas_list2[[2]]) <- sapply(names(betas_list2[[2]]), convert_ensembl_to_uniprot)
+names(betas_list2) <- sapply(names(clust_vec2), convert_ensembl_to_uniprot)
+```
+
+#### Unitprot function
+
+```{r}
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+convert_ensembl_to_uniprot <- function(ensembl_ids) {
+  if (length(ensembl_ids) == 0) {
+    return(character())
+  }
+  
+  ensembl_ids <- gsub("9606\\.", "", ensembl_ids)
+  result <- tryCatch(
+    {
+      getBM(attributes = c("ensembl_peptide_id", "uniprotswissprot"),
+            filters = "ensembl_peptide_id",
+            values = ensembl_ids,
+            mart = ensembl)
+    },
+    error = function(e) {
+      return(character())
+    }
+  )
+  
+  if (inherits(result, "try-error")) {
+    return(character())
+  }
+  return(result$uniprotswissprot)
+}
+
+
+```
+
+#### Dataset simulation
+
+```{r}
+data <- readRDS('/Users/niels/Documents/Uni/Stage/digital_twins/X1_dig_twin_data.rds')
+mean_values <- colMeans(data)
+std_values <- apply(data, 2, sd)
+gene_mean_std <- list(mean_values, std_values)
 ```
 
