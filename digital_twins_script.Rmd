@@ -15,87 +15,136 @@ library(tidyverse)
 library(magrittr)
 library(biomaRt)
 # sup <- UniProt.ws(UniProt.version = "uniprot", use.cache = TRUE)
-string_db <- STRINGdb$new( version="11.5", species=9606, score_threshold=400, network_type="full", input_directory="")
+# BiocManager::install("STRINGdb")
+string_db <- STRINGdb$new( version="11.5", species=9606, score_threshold=400, network_type="full", input_directory="/Users/niels/Documents/Uni/Stage/digital_twins/")
 ```
 
 
 ```{r}
-clust_proteins <- read.csv('/Users/niels/Documents/Uni/Stage/digital_twins/cluster_proteins.csv')
+# Read siginificant cluster proteins
+clust_proteins <- read.csv("/Users/niels/Documents/Uni/Stage/digital_twins/cluster_proteins.csv")
 clust_proteins <- clust_proteins[, 1]
 
-fold_data <- readxl::read_xlsx('/Users/niels/Documents/Uni/Stage/digital_twins/fold_data.xlsx') %>%
+# Read and format fold change data accross disease stages
+fold_data <- readxl::read_xlsx("/Users/niels/Documents/Uni/Stage/digital_twins/fold_data.xlsx") %>%
   as.data.frame() %>%
-  select(c(-1, )) %>%
-  filter(!row_number() %in% c(247, 248, 249)) %>%
+  dplyr::select(c(-1, )) %>%
+  dplyr::filter(!row_number() %in% c(247, 248, 249)) %>%
   column_to_rownames(var = "Gene name") %>%
   separate(col = "late_vs_ctrl_95%CI", sep = "-", into = c("late_vs_ctrl_95%CI_low", "late_vs_ctrl_95%CI_high")) %>%
   separate(col = "early_vs_ctrl_95%CI", sep = "-", into = c("early_vs_ctrl_95%CI_low", "early_vs_ctrl_95%CI_high")) %>%
   separate(col = "late_vs_early_95%CI", sep = "-", into = c("late_vs_early_95%CI_low", "late_vs_early_95%CI_high")) %>%
-  mutate(across(2:8, ~as.numeric(gsub(",", ".", .)))) %>%
+  mutate(across(2:8, ~ as.numeric(gsub(",", ".", .)))) %>%
   mutate(across(2:8, log2))
 
+# Create sig which will contain genes with significantly changed proteins expressions and sig_fold with the fold change
 sig <- c()
+sig_fold <- list()
 i <- 0
-proteins <- c(fold_data$`Protein AC`)
 
+# Filling sig and sig fold with names and values respectively
 for (i in 1:length(rownames(fold_data))) {
   early <- fold_data$early_vs_ctrl_mean[i]
   late <- fold_data$late_vs_ctrl_mean[i]
-  protein <- proteins[i]
-  i <- i +1
-  if (early >= 1.8 || early <= -1.8) { #Why is the threshold 1.8 when the article clearly states 2?
+  protein <- c(fold_data$`Protein AC`)[i]
+  i <- i + 1
+  if (early >= 1.8 || early <= -1.8) { # Why is the threshold 1.8 when the article clearly states 2?
     sig <- c(sig, protein)
-  }
-  
-  else if (late >= 1.8 || late <= -1.8) {
+    sig_fold <- c(sig_fold, early)
+  } else if (late >= 1.8 || late <= -1.8) {
     sig <- c(sig, protein)
+    sig_fold <- c(sig_fold, late)
   }
 }
-print(sig) %>% cat(sep="\n")
 
-# intersect(x = sig, c("GPX3", "HRG", "POSTN", "DCD", "ZHX3", "IBP3", "MYLK", "APOF", "FA5", "GMFB", "CO1A1"))
+# Naming the list of sig_fold
+names(sig_fold) <- sig
+```
+
+```{r}
+# Read in data and calculating mean and standard deviation values for each gene
+data <- readRDS("/Users/niels/Documents/Uni/Stage/digital_twins/X1_dig_twin_data.rds")
+mean_values <- colMeans(data)
+std_values <- apply(data, 2, sd)
+
+# Creating vector data_proteins of all genes/proteins in our original dataset
+data_proteins <- colnames(data)
 ```
 
 #### Ensembl
 
 ```{r}
-string_db <- STRINGdb$new( version="11.5", species=9606, score_threshold=400, network_type="full", input_directory="")
-
 cluster_ensembl <- c()
+proteins_ensembl <- c()
 
+# Creating vector by mapping cluster uniprot characters to ensembl using STRING
 for (i in seq_along(clust_proteins)) {
   string_map <- string_db$mp(clust_proteins[i])
   cluster_ensembl <- c(cluster_ensembl, string_map)
 }
 
-new_vec2 <- lapply (seq_along(sig), function(i) {
+# Creating vector by mapping all original data uniprot proteins to ensembl using STRING
+for (i in seq_along(data_proteins)) {
+  string_map <- string_db$mp(clust_proteins[i])
+  proteins_ensembl <- c(proteins_ensembl, string_map)
+}
+
+# Creating a list by mapping our significant fold proteins to their neighbours and keeping the proteins in our dataset
+neightbours_list <- lapply(seq_along(sig), function(i) {
   string_map <- string_db$mp(sig[i])
   neighbours <- string_db$get_neighbors(string_map)
-  intersect_neighbours <- intersect(c(string_map, neighbours), cluster_ensembl)
+  intersect_neighbours <- intersect(c(string_map, neighbours), proteins_ensembl)
   return(intersect_neighbours)
 })
-names(new_vec2) <- sig
 
-clust_vec2 <- lapply(unique(unlist(new_vec2)), function(clust_id){
-  outp <- sapply(seq_along(new_vec2), function(clust_ii){
-    if(clust_id %in% new_vec2[[clust_ii]]) return(sig[clust_ii]) else NA
+# Naming neightbours_list
+names(neightbours_list) <- sig
+
+# Creating a list of all unique cluster proteins in the neightbours_list and their neighbours
+cluster_list <- lapply(unique(unlist(neightbours_list)), function(clust_id) {
+  outp <- sapply(seq_along(neightbours_list), function(clust_ii) {
+    if (clust_id %in% neightbours_list[[clust_ii]]) {
+      return(sig[clust_ii])
+    } else {
+      NA
+    }
   })
-  return(c(na.omit(outp)))
+  return(c(na.omit(outp)))   # Removing NA values from the list
 })
-names(clust_vec2) <- unique(unlist(new_vec2))
 
-# 
-# str_names <- c(names(clust_vec2)[2], clust_vec2[[2]])
-# string_map <- string_db$mp(str_names)
-# str_intr <- string_db$get_subnetwork(string_map)
-# E(str_intr)$combined_score %<>% divide_by(2000)
-# str_nw <- as_adj(str_intr, attr = "combined_score")
-#  
-# betas <- str_nw[string_map[-1], string_map[1]]
-# if(any(!is.finite(betas))) break
+# Naming cluster_list
+names(cluster_list) <- unique(unlist(neightbours_list))
+```
 
-### Y <- scale(X %*% orth(betas))
+#### Unitprot function
 
+```{r}
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Function to convert Ensembl characters to uniprot
+convert_ensembl_to_uniprot <- function(ensembl_ids) {
+  if (length(ensembl_ids) == 0) {
+    return(character())
+  }
+  ensembl_ids <- gsub("9606\\.", "", ensembl_ids)    # STRING mapping returns values starting with 9606. which is first removed
+  result <- tryCatch(
+    {
+      getBM(
+        attributes = c("ensembl_peptide_id", "uniprotswissprot"),
+        filters = "ensembl_peptide_id",
+        values = ensembl_ids,
+        mart = ensembl
+      )
+    },
+    error = function(e) {
+      return(character())
+    }
+  )
+  if (inherits(result, "try-error")) {
+    return(character())
+  }
+  return(result$uniprotswissprot)
+}
 ```
 
 #### Uniprot ID's
@@ -103,114 +152,77 @@ names(clust_vec2) <- unique(unlist(new_vec2))
 ```{r}
 betas_list <- list()
 
-for (i in seq_along(clust_vec2)) {
-  str_names <- c(names(clust_vec2)[i], clust_vec2[[i]])
+# Filling betas list with mapping proteins and scoring their interactions
+for (i in seq_along(cluster_list)) {
+  str_names <- c(names(cluster_list)[i], cluster_list[[i]])
   string_map <- string_db$mp(str_names)
-  
   str_intr <- string_db$get_subnetwork(string_map)
-  E(str_intr)$combined_score %<>% divide_by(2000)
+  E(str_intr)$combined_score %<>% divide_by(2000)   # Scoring function {insert source}
   str_nw <- as_adj(str_intr, attr = "combined_score")
-  
   betas <- str_nw[string_map[-1], string_map[1]]
-  
   if (length(betas) == 1) {
-    protein <- names(clust_vec2[i])
-    protein_ensembl <- clust_vec2[[paste0("", protein, "")]]
+    protein <- names(cluster_list[i])
+    protein_ensembl <- cluster_list[[paste0("", protein, "")]]
     betas <- setNames(betas, protein_ensembl)
   }
-  print(betas)
+  # print(betas)
   betas_list[[i]] <- betas
-  
   if (length(betas) > 1) {
-  names(betas_list[[i]]) <- sapply(names(betas_list[[i]]), convert_ensembl_to_uniprot)
+    names(betas_list[[i]]) <- sapply(names(betas_list[[i]]), convert_ensembl_to_uniprot)
   }
 }
 
-names(betas_list) <- sapply(names(clust_vec2), convert_ensembl_to_uniprot)
+# Naming the entries in the betas list by converting convert_ensembl_to_uniprot
+names(betas_list) <- sapply(names(cluster_list), convert_ensembl_to_uniprot)
 
+# Some Ensembl ID's are now in the uniprot archive. Manual search gives these corresponding uniprot ID's
 names(betas_list)[3] <- "P01042"
 names(betas_list)[36] <- "P61769"
 names(betas_list)[39] <- "P02746"
+
+# Removing 1 duplicate from list
+if (any(duplicated(names(betas_list)))) betas_list <- betas_list[-which(duplicated(names(betas_list)))]
 ```
-
-
-#### Unitprot function
-
-```{r}
-ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
-
-convert_ensembl_to_uniprot <- function(ensembl_ids) {
-  if (length(ensembl_ids) == 0) {
-    return(character())
-  }
-  
-  ensembl_ids <- gsub("9606\\.", "", ensembl_ids)
-  result <- tryCatch(
-    {
-      getBM(attributes = c("ensembl_peptide_id", "uniprotswissprot"),
-            filters = "ensembl_peptide_id",
-            values = ensembl_ids,
-            mart = ensembl)
-    },
-    error = function(e) {
-      return(character())
-    }
-  )
-  
-  if (inherits(result, "try-error")) {
-    return(character())
-  }
-  return(result$uniprotswissprot)
-}
-
-  if (length(betas) == 1) {
-    protein <- names(clust_vec2[3])
-    protein_ensembl <- clust_vec2[[paste0("", protein, "")]]
-    betas <- setNames(betas, protein_ensembl)
-  }
-```
-
 
 #### Create biomarker to clust betas
 
 ```{r}
+# Creating vector of all unique names inside the entries within betas_list
 biom_names <- unique(unlist(sapply(betas_list, names)))
-biom_betas <- lapply(seq_along(biom_names), function(ii){
+
+# Creating a list of all unique values within the betas_list and corresponding betas
+biom_betas <- lapply(seq_along(biom_names), function(ii) {
   biom_ii <- biom_names[ii]
-  outp1 <- sapply(betas_list, function(betass){
-    if(biom_ii %in% names(betass)){
-      biom_betas_ii <- which(biom_ii %in% names(betass))
+  outp1 <- sapply(betas_list, function(betass) {
+    if (biom_ii %in% names(betass)) {
+      biom_betas_ii <- which(names(betass) %in% biom_ii)
       return_betas <- betass[biom_betas_ii]
-      if(any(return_betas == 0)) return_betas[return_betas == 0] = 1
+      if (any(return_betas == 0)) return_betas[return_betas == 0] <- 1
+      # if(any(biom_ii %in% return_betas)) return_betas[which(biom_ii %in% return_betas)] = 1
       return(return_betas)
       # names(return_betas) <- names(betass)[biom_betas_ii]
-    } else {return(NULL)}
+    } else {
+      return(NULL)
+    }
   })
   return(outp1)
 })
-biom_betas <- lapply(biom_betas, function(e){
+
+# removing duplicates
+biom_betas <- lapply(biom_betas, function(e) {
   outp <- unlist(e)
-  names(outp) <- str_sub(names(outp), 1,6)
-  if(anyDuplicated(names(outp))) outp <- outp[-which(duplicated(names(outp)))]
+  names(outp) <- str_sub(names(outp), 1, 6)
+  if (anyDuplicated(names(outp))) outp <- outp[-which(duplicated(names(outp)))]
   return(outp)
 })
+
 names(biom_betas) <- biom_names
 ```
 
 #### Dataset simulation
 
 ```{r}
-data <- readRDS('/Users/niels/Documents/Uni/Stage/digital_twins/X1_dig_twin_data.rds')
-mean_values <- colMeans(data)
-std_values <- apply(data, 2, sd)
-gene_mean_std <- list(mean_values, std_values)
-
-mean_biom <- lapply(biom_betas, function(e){
-  
-})
-```
-
-```{r}
+# Function to replace the mean of the means of the betas for each entry in biom_betas 
 replace_with_means <- function(biom_betas, mean_values) {
   for (protein_name in names(biom_betas)) {
     cluster <- names(biom_betas[[protein_name]])
@@ -223,58 +235,130 @@ replace_with_means <- function(biom_betas, mean_values) {
   return(biom_betas)
 }
 
-replace_with_std <- function(biom_betas, std_values) {
+# Function to replace the mean of the standard deviations of the betas for each entry in biom_betas 
+replace_with_std <- function(biom_betas, mean_values) {
   for (protein_name in names(biom_betas)) {
     cluster <- names(biom_betas[[protein_name]])
-    mean_prots <- sapply(cluster, function(e) {
+    std_prots <- sapply(cluster, function(e) {
       std_values[[e]]
     })
-    std_value <- mean(mean_prots)
+    std_value <- mean(std_prots)
     biom_betas[[protein_name]] <- std_value
   }
   return(biom_betas)
 }
 
+# Setting the means of the biom_betas
 mean_biom_betas <- replace_with_means(biom_betas, mean_values)
 std_biom_betas <- replace_with_std(biom_betas, std_values)
-
-print(updated_biom_betas[1])
-biom_betas[1]
 ```
 
+#### Simulating sick individuals
+
 ```{r}
-num_simulations <- 50
-num_proteins <- length(mean_biom_betas)
+# Vector with all beta protein names
+betas_proteins <- names(biom_betas) 
 
-# Create an empty dataframe to store the simulated values
-simulated_data <- data.frame(matrix(NA, nrow = num_simulations, ncol = num_proteins))
-colnames(simulated_data) <- names(mean_biom_betas)
+# Vector of proteins not in betas
+rest_biom <- setdiff(names(biom_betas), data_proteins) 
 
-# Generate the simulated values for each protein
-for (i in 1:num_proteins) {
-  simulated_data[, i] <- rnorm(num_simulations, mean = mean_biom_betas[i], sd = std_biom_betas[i])
-}
+# Variable to set how many sick individuals will be simulated
+N_sick <- 50
 
-# View the resulting dataframe
-print(simulated_data)
+# Simulating sick individuals with the added unique biom betas not in our original dataset
+sick_sim <- sapply(seq_along(data_proteins), function(ii) {
+  sig_protein <- data_proteins[ii]
+  simulated_values <- rnorm(N_sick, mean = mean_values[[ii]], sd = std_values[[ii]])
+  if (sig_protein %in% sig) {
+    fold_change_index <- which(sig_protein == names(sig_fold))
+    simulated_values <- simulated_values + sig_fold[[fold_change_index]]
+    # print("fold")
+  }
+  return(simulated_values)
+}) %>%
+  cbind(
+    .,
+    sapply(rest_biom, function(e) {
+      rnorm(N_sick, mean = mean_biom_betas[[e]] + sig_fold[[e]], sd = std_biom_betas[[e]])
+    })
+  )
 
-result <- setdiff(names(mean_values), names(mean_biom_betas))
+# Naming the first 227 columns to match the gene names in our data and naming the rows
+colnames(sick_sim)[1:227] <- colnames(data)
+rownames(sick_sim) <- paste("sick", 1:N_sick, sep = "_")
 
-print(result)
+# Simulating sick individuals values based on the betas in our 227 proteins
+sick_sim_final <- sapply(seq_along(colnames(sick_sim)), function(ii) {
+  sig_protein <- colnames(sick_sim)[ii]
+  simulated_values <- sick_sim[, sig_protein]
+  if (sig_protein %in% names(betas_list)) {
+    entry <- betas_list[[which(names(betas_list) %in% sig_protein)]]
+    selected_proteins <- names(entry)
+    # if ((sig_protein %in% selected_proteins)) cat("biomarker =", sig_protein, "\n")
+    if (!(sig_protein %in% selected_proteins)) {
+      subset_dataframe <- as.matrix(sick_sim[, selected_proteins])
+      num_vector <- unname(entry)
+      simulated_values <- subset_dataframe %*% num_vector
+      # print("Biomarker")
+    }
+  }
+  return(simulated_values)
+})
 
+# Naming the columns of sick_sim_final
+colnames(sick_sim_final) <- colnames(sick_sim)
 ```
 
 
 ```{r}
-ensembl_version <- "GRCh38"
-edb <- ensembldb::EnsDb(ensembl_version)
+# Variable to set how many healthy individuals will be simulated
+N_healthy <- 50
 
-ensemble_protein_ids <- c("ENSP00000123456", "ENSP00000234567", "ENSP00000345678", "ENSP00000456789")
+# Simulating healthy individuals with the added unique biom betas not in our original dataset
+healthy_sim <- sapply(seq_along(data_proteins), function(ii) {
+  sig_protein <- data_proteins[ii]
+  simulated_values <- rnorm(N_healthy, mean = mean_values[[ii]], sd = std_values[[ii]])
+  if (sig_protein %in% sig) {
+    fold_change_index <- which(sig_protein == names(sig_fold))
+    simulated_values <- simulated_values #+ 0*sig_fold[[fold_change_index]]
+  }
+  return(simulated_values)
+}) %>%
+  cbind(sapply(rest_biom, function(e){
+  rnorm(N_healthy, mean = mean_biom_betas[[e]] + 0*sig_fold[[e]], sd = std_biom_betas[[e]])
+})
+)
 
-# Convert Ensemble protein IDs to UniProt IDs
-uniprot_ids <- select(edb, keys=ensemble_protein_ids, keytype="PROTEINID", columns=c("UNIPROT"))
+colnames(healthy_sim)[1:227] <- colnames(data)
+rownames(healthy_sim) <- paste("healthy", 1:N_healthy, sep = "_")
 
-# Print the results
-print(uniprot_ids)
+# Simulating healthy individuals values based on the betas in our 227 proteins
+healthy_sim_final <- sapply(seq_along(colnames(healthy_sim)), function(ii) {
+  sig_protein <- colnames(healthy_sim)[ii]
+  simulated_values <- healthy_sim[, sig_protein]
+  if (sig_protein %in% names(betas_list)) {
+    entry <- betas_list[[which(names(betas_list) %in% sig_protein)]]
+    selected_proteins <- names(entry)
+    if((sig_protein %in% selected_proteins)) cat("biomarker =", sig_protein, "\n")
+    if(!(sig_protein %in% selected_proteins)) {
+      subset_dataframe <- as.matrix(healthy_sim[, selected_proteins])
+      num_vector <- unname(entry)
+      simulated_values <- subset_dataframe %*% num_vector
+      # print("Biomarker")
+    }
+  }
+  return(simulated_values)
+})
+
+# Naming the columns of healthy healthy_sim_final
+colnames(healthy_sim_final) <- colnames(healthy_sim)
+
+# Creating a dataframe of sick and healthy individuals which only contains the genes from our original dataset
+DT_dat <- rbind(healthy_sim_final[,data_proteins], sick_sim_final[,data_proteins])
+```
+```{r}
+tibble(as.data.frame(DT_dat[,unique(unlist(sapply(biom_betas, names)))])) %>% bind_cols(group = rep(c("healthy","sick"),times=c(N_healthy, N_sick)), .) %>% pivot_longer(cols = -group) %>% ggplot(aes(x=name, y=value, col=group)) + geom_boxplot()
+
+apply(data, 2, function(e) t.test(e ~ group)$p.val) %>% p.adjust("fdr")
 ```
 
