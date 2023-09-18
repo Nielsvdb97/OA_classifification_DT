@@ -16,7 +16,7 @@ library(magrittr)
 library(biomaRt)
 # sup <- UniProt.ws(UniProt.version = "uniprot", use.cache = TRUE)
 # BiocManager::install("STRINGdb")
-string_db <- STRINGdb$new( version="11.5", species=9606, score_threshold=400, network_type="full", input_directory="/Users/niels/Documents/Uni/Stage/digital_twins/")
+string_db <- STRINGdb$new( version="11.5", species=9606, score_threshold=400, network_type="full", input_directory="/Users/niels/Documents/Uni/Stage/digital_twins/") # Save locally to save reconnecting to STRINGdb
 ```
 
 
@@ -60,6 +60,8 @@ for (i in 1:length(rownames(fold_data))) {
 # Naming the list of sig_fold
 names(sig_fold) <- sig
 ```
+
+#### Reading data and determining mean and std
 
 ```{r}
 # Read in data and calculating mean and standard deviation values for each gene
@@ -182,6 +184,22 @@ names(betas_list)[39] <- "P02746"
 
 # Removing 1 duplicate from list
 if (any(duplicated(names(betas_list)))) betas_list <- betas_list[-which(duplicated(names(betas_list)))]
+```
+
+#### Saving/reading variables
+
+```{r}
+# saveRDS(cluster_ensembl, "/Users/niels/Documents/Uni/Stage/digital_twins/cluster_ensembl.rds")
+# saveRDS(proteins_ensembl, "/Users/niels/Documents/Uni/Stage/digital_twins/proteins_ensembl.rds")
+# saveRDS(neightbours_list, "/Users/niels/Documents/Uni/Stage/digital_twins/neightbours_list.rds")
+# saveRDS(cluster_list, "/Users/niels/Documents/Uni/Stage/digital_twins/cluster_list.rds")
+# saveRDS(betas_list, "/Users/niels/Documents/Uni/Stage/digital_twins/betas_list.rds")
+
+# cluster_ensembl <- readRDS("/Users/niels/Documents/Uni/Stage/digital_twins/cluster_ensembl.rds")
+# proteins_ensembl <- readRDS("/Users/niels/Documents/Uni/Stage/digital_twins/proteins_ensembl.rds")
+# neightbours_list <- readRDS("/Users/niels/Documents/Uni/Stage/digital_twins/neightbours_list.rds")
+# cluster_list <- readRDS("/Users/niels/Documents/Uni/Stage/digital_twins/cluster_list.rds")
+# betas_list <- readRDS("/Users/niels/Documents/Uni/Stage/digital_twins/betas_list.rds")
 ```
 
 #### Create biomarker to clust betas
@@ -356,9 +374,215 @@ colnames(healthy_sim_final) <- colnames(healthy_sim)
 # Creating a dataframe of sick and healthy individuals which only contains the genes from our original dataset
 DT_dat <- rbind(healthy_sim_final[,data_proteins], sick_sim_final[,data_proteins])
 ```
+
+```{r}
+STRING_data_sim <- function(N_healthy, N_sick) {
+  # Vector with all beta protein names
+  betas_proteins <- names(biom_betas) 
+  
+  # Vector of proteins not in betas
+  rest_biom <- setdiff(names(biom_betas), data_proteins) 
+  
+  # Simulating sick individuals with the added unique biom betas not in our original dataset
+  sick_sim <- sapply(seq_along(data_proteins), function(ii) {
+    sig_protein <- data_proteins[ii]
+    simulated_values <- rnorm(N_sick, mean = mean_values[[ii]], sd = std_values[[ii]])
+    if (sig_protein %in% sig) {
+      fold_change_index <- which(sig_protein == names(sig_fold))
+      simulated_values <- simulated_values + sig_fold[[fold_change_index]]
+      # print("fold")
+    }
+    return(simulated_values)
+  }) %>%
+    cbind(
+      .,
+      sapply(rest_biom, function(e) {
+        rnorm(N_sick, mean = mean_biom_betas[[e]] + sig_fold[[e]], sd = std_biom_betas[[e]])
+      })
+    )
+  
+  # Naming the first 227 columns to match the gene names in our data and naming the rows
+  colnames(sick_sim)[1:227] <- colnames(data)
+  rownames(sick_sim) <- paste("sick", 1:N_sick, sep = "_")
+  
+  # Simulating sick individuals values based on the betas in our 227 proteins
+  sick_sim_final <- sapply(seq_along(colnames(sick_sim)), function(ii) {
+    sig_protein <- colnames(sick_sim)[ii]
+    simulated_values <- sick_sim[, sig_protein]
+    if (sig_protein %in% names(betas_list)) {
+      entry <- betas_list[[which(names(betas_list) %in% sig_protein)]]
+      selected_proteins <- names(entry)
+      # if ((sig_protein %in% selected_proteins)) cat("biomarker =", sig_protein, "\n")
+      if (!(sig_protein %in% selected_proteins)) {
+        subset_dataframe <- as.matrix(sick_sim[, selected_proteins])
+        num_vector <- unname(entry)
+        simulated_values <- subset_dataframe %*% num_vector
+        # print("Biomarker")
+      }
+    }
+    return(simulated_values)
+  })
+  
+  # Naming the columns of sick_sim_final
+  colnames(sick_sim_final) <- colnames(sick_sim)
+  
+  # Simulating healthy individuals with the added unique biom betas not in our original dataset
+  healthy_sim <- sapply(seq_along(data_proteins), function(ii) {
+    sig_protein <- data_proteins[ii]
+    simulated_values <- rnorm(N_healthy, mean = mean_values[[ii]], sd = std_values[[ii]])
+    if (sig_protein %in% sig) {
+      fold_change_index <- which(sig_protein == names(sig_fold))
+      simulated_values <- simulated_values #+ 0*sig_fold[[fold_change_index]]
+    }
+    return(simulated_values)
+  }) %>%
+    cbind(sapply(rest_biom, function(e){
+      rnorm(N_healthy, mean = mean_biom_betas[[e]] + 0*sig_fold[[e]], sd = std_biom_betas[[e]])
+    })
+    )
+  
+  colnames(healthy_sim)[1:227] <- colnames(data)
+  rownames(healthy_sim) <- paste("healthy", 1:N_healthy, sep = "_")
+  
+  # Simulating healthy individuals values based on the betas in our 227 proteins
+  healthy_sim_final <- sapply(seq_along(colnames(healthy_sim)), function(ii) {
+    sig_protein <- colnames(healthy_sim)[ii]
+    simulated_values <- healthy_sim[, sig_protein]
+    if (sig_protein %in% names(betas_list)) {
+      entry <- betas_list[[which(names(betas_list) %in% sig_protein)]]
+      selected_proteins <- names(entry)
+      # if((sig_protein %in% selected_proteins)) cat("biomarker =", sig_protein, "\n")
+      if(!(sig_protein %in% selected_proteins)) {
+        subset_dataframe <- as.matrix(healthy_sim[, selected_proteins])
+        num_vector <- unname(entry)
+        simulated_values <- subset_dataframe %*% num_vector
+        # print("Biomarker")
+      }
+    }
+    return(simulated_values)
+  })
+  
+  # Naming the columns of healthy healthy_sim_final
+  colnames(healthy_sim_final) <- colnames(healthy_sim)
+  
+  # Creating a dataframe of sick and healthy individuals which only contains the genes from our original dataset
+  DT_dat <- rbind(healthy_sim_final[,data_proteins], sick_sim_final[,data_proteins])
+  
+  # Return the resulting data frame
+  return(DT_dat)
+}
+
+# Usage example:
+result <- STRING_data_sim(N_healthy = 50, N_sick = 50)
+ 
+```
+
+
 ```{r}
 tibble(as.data.frame(DT_dat[,unique(unlist(sapply(biom_betas, names)))])) %>% bind_cols(group = rep(c("healthy","sick"),times=c(N_healthy, N_sick)), .) %>% pivot_longer(cols = -group) %>% ggplot(aes(x=name, y=value, col=group)) + geom_boxplot()
+```
+#### O2M fit
 
-apply(data, 2, function(e) t.test(e ~ group)$p.val) %>% p.adjust("fdr")
+```{r}
+# Reading in the previous fit
+fit_o2m <- readRDS("/Users/niels/Documents/Uni/Stage/digital_twins/fit_o2m")
+
+# Creating scores based on previous fit
+tot_scores <- scale(DT_dat %*% fit_o2m$W.)
+
+# Reading in previous cluster details
+cluster_details <- readRDS("/Users/niels/Documents/Uni/Stage/digital_twins/cluster_detailed.rds")
+```
+
+#### K-means clustering
+
+```{r}
+n_clusters <- 2
+n_iterations <- 100
+
+# function to cluster scores based on the lowest k-means
+best_k_means <- function(data, n_iterations, n_clusters) {
+  k_clusters_list <- lapply(1:n_iterations, function(i) {
+    kmeans(data, centers = n_clusters, iter.max = i)
+  })
+  
+  total_distances <- sapply(k_clusters_list, function(k_clusters) {
+    sum(k_clusters$withinss)
+  })
+  
+  selected_cluster <- k_clusters_list[[which.min(total_distances)]]
+  best_cluster <- selected_cluster$cluster
+  
+  return(selected_cluster)
+}
+
+# Clustering based on scores
+k_means_cluster <- best_k_means(tot_scores, n_iterations, n_clusters)
+```
+
+#### Scores
+
+```{r}
+fit_lda <- MASS::lda(tot_scores, k_means_cluster)
+
+Prot_Betas <- OmicsPLS::loadings(fit_o2m,"Xj") %*% coef(fit_lda)
+Prot_Betas_ord <- rownames(Prot_Betas)[order(Prot_Betas^2, decreasing = TRUE)]
+Prot_Betas <- Prot_Betas[Prot_Betas_ord, ]
+
+apply(DT_dat, 2, function(e) t.test(e ~ group)$p.val) %>% p.adjust("fdr")
+
+# groups <- ifelse(grepl("healthy", rownames(DT_dat)), "healthy", "sick")
+groups <- ifelse(grzepl(1, k_means_cluster), 1, 2)
+  
+p_values <- apply(DT_dat, 2, function(e) t.test(e ~ groups)$p.value)
+
+adjusted_p_values <- p.adjust(p_values, "fdr")
+
+adjusted_p_values[order(adjusted_p_values)]
+
+clue::cl_predict(cluster_details, tot_scores)
+conf_matrix <- caret::confusionMatrix(factor(clue::cl_predict(cluster_details, tot_scores)), factor(ifelse(1:100 <= 50, 2, 1)))
+
+conf_matrix$byClass
+```
+
+```{r}
+## repeat 200 times
+num_simulations <- 200
+
+# List of resulting cl_predict values
+results_list <- list()
+
+# Use lapply to run the simulation function num_simulations times
+results_list <- lapply(1:num_simulations, function(i) {
+  # Call the STRING_data_sim function with your desired N_healthy and N_sick values
+  train_sim <- STRING_data_sim(N_healthy = 35, N_sick = 35)
+
+  tot_scores <- scale(train_sim %*% fit_o2m$W.)
+
+  cluster <-  best_k_means(tot_scores, n_iterations, n_clusters)
+
+  test_sim <- STRING_data_sim(N_healthy = 500, N_sick = 500)
+  test_tot_scores <- scale(test_sim %*% fit_o2m$W.)
+  
+  cluster_predict <- clue::cl_predict(cluster, test_tot_scores)
+  
+  conf_matrix <- caret::confusionMatrix(factor(cluster_predict), factor(ifelse(1:1000 <= 500, 2, 1)))
+  
+  result <- c(conf_matrix$byClass[1], conf_matrix$byClass[2])
+  return(result)
+})
+# simulating training data 35:35
+
+# Calculating components based on o2m
+
+# New k-means clustering
+
+# Simulating more test data 500:500
+
+# cl_predict() using training k-means on test data
+
+# Saving accuracy of prediction
+
 ```
 
