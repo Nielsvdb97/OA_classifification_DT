@@ -1,0 +1,582 @@
+---
+title: "data_analysis"
+author: "Niels van den Berg"
+date: "2023-04-27"
+output: html_notebook
+---
+
+```{r}
+# Define the directory path
+dir <- "/Users/niels/Documents/Uni/Stage/"
+
+# Setting the seed
+set.seed(123)
+
+# Load necessary libraries
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(mi4p)
+library(reshape2)
+library(corrr)
+library(ggcorrplot)
+library(factoextra)
+library(bestNormalize)
+library(missForest)
+library(gplots)
+library(circlize)
+library(OmicsPLS)
+library(VIM)
+library(scales)
+library(flexclust)
+```
+
+#### Clinical Data
+
+```{r}
+# Load demographic data
+demographic_data <- read_delim(paste0(dir, "data/Demographics_20211129.txt"))
+demographic_data <- demographic_data[complete.cases(demographic_data$Age), ]
+demographic_data$Participant <- sub("^00", "", demographic_data$Participant)
+
+# Load phenotype data
+phenotype_data <- read_delim(paste0(dir, "data/binary_phenotypes.txt"))
+
+# Load physical examination data
+physical_data <- read_delim(paste0(dir, "data/Physical_examination_20211129.txt"))
+physical_data$Participant <- sub("^00", "", physical_data$Participant)
+physical_data <- physical_data[physical_data$Visit == "ASSE", ]
+
+# Load clinical data
+clinical_data <- read_xls(paste0(dir, "data/IDs_per_patient[73].xls"))
+colnames(clinical_data) <- gsub(" ", "_", colnames(clinical_data))
+clinical_data$Participant <- as.character(clinical_data$Participant)
+clinical_data <- merge(clinical_data, demographic_data[, c("Participant", "Age", "Sex")], by = "Participant", all.x = TRUE)
+clinical_data <- merge(clinical_data, physical_data[, c("Participant", "Weight", "Height", "BMI")], by = "Participant", all.x = TRUE)
+
+# Classifying of samples
+clinical_data <- merge(clinical_data, phenotype_data[, c("FID", "KOOS_pain_all_regr", "minJSW_regr")], by.x = "Family_IDs_in_Genomics", by.y = "FID", all.x = TRUE)
+clinical_data$Phenotype <- ifelse(clinical_data$KOOS_pain_all_regr >= 2 & clinical_data$minJSW_regr >= 2, "P/S",
+  ifelse(clinical_data$KOOS_pain_all_regr >= 2, "P",
+    ifelse(clinical_data$minJSW_regr >= 2, "S", "N")
+  )
+)
+clinical_data$Merge <- paste(clinical_data$eCRF_ID, "_", clinical_data$Phenotype, sep = "")
+
+```
+
+#### Data loading
+
+```{r}
+# Load Spain experimental design data
+spain_ids <- readxl::read_xlsx(paste0(dir, "data/spain_experimental_design_extra_pheno.xlsx")) %>%
+  as.data.frame() %>%
+  filter(grepl("V1$", Experiment...7)) %>%
+  mutate_all(~ replace(., . == "P and S", "P/S"))
+
+# Load Lund data
+lund_data <- readxl::read_xlsx(paste0(dir, "data/lund_data.xlsx")) %>%
+  slice(., -c(1:3)) %>%
+  column_to_rownames("...1") %>%
+  select(-(1:3)) %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate_all(~ replace(., . == NaN, NA))
+
+lund_data <- data.frame(lapply(lund_data, function(x) as.numeric(as.character(x))),
+  check.names = FALSE, row.names = rownames(lund_data)
+)
+
+#adjust rownames to match original eCRF ID
+rownames(lund_data) <- lapply(as.numeric(rownames(lund_data)), function(x) x + 10000) 
+
+# Load Spain data
+spain_data <- read.table(paste0(dir, "data/spain_data_filtered.txt"), header = FALSE, sep = "\t") %>%
+  mutate_all(~ replace(., . == "Majority protein IDs", "Majority_protein_IDs")) %>%
+  column_to_rownames(., var = "V103") %>%
+  t() %>%
+  as_tibble() %>%
+  filter(grepl("V1$", Majority_protein_IDs)) %>%
+  column_to_rownames(var = "Majority_protein_IDs") %>%
+  mutate_all(~ replace(., . == 0, NA))
+
+spain_data <- data.frame(lapply(spain_data, function(x) as.numeric(as.character(x))),
+  check.names = FALSE, row.names = rownames(spain_data)
+)
+
+# Setting Spain rownames to eCRF ID's
+rownames_spain <- function(x) {
+  rownames <- rownames(x)
+  spain_row <- character(length = nrow(x))
+  for (i in seq_along(rownames)) {
+    y <- rownames[i]
+    row_index <- which(spain_ids[, "Experiment...7"] == y)
+    spain_row[i] <- paste(spain_ids[row_index, "eCRF ID...2"], spain_ids[row_index, "Combined"])
+  }
+  spain_row <- gsub(" ", "_", spain_row)
+  return(spain_row)
+}
+
+rownames(spain_data) <- rownames_spain(spain_data)
+spain_rownames <- rownames(spain_data)
+
+# Setting Lund rownames to eCRF ID's
+rownames_lund <- function(x) {
+  rownames <- rownames(x)
+  phenotype_row <- character(length = nrow(x))
+  for (i in seq_along(rownames)) {
+    y <- rownames[i]
+    row_index <- which(clinical_data[, "eCRF_ID"] == y)
+    if (length(row_index) > 0) {
+      phenotype_row[i] <- paste(y, clinical_data[row_index, "Phenotype"])
+    }
+  }
+  phenotype_row <- gsub(" ", "_", phenotype_row)
+  return(phenotype_row)
+}
+
+rownames(lund_data) <- rownames_lund(lund_data)
+lund_rownames <- rownames(lund_data)
+```
+
+#### Missingness
+
+```{r}
+# Create a missing data pattern plot
+md_pattern_plot_lund <- aggr(lund_data, col = c("blue", "red"),
+                        numbers = TRUE, sortVars = TRUE,
+                        labels = colnames(lund_data), cex.axis = 0.7, gap = 3)
+
+# Create a missing data pattern plot
+md_pattern_plot_spain <- aggr(spain_data, col = c("blue", "red"),
+                        numbers = TRUE, sortVars = TRUE,
+                        labels = colnames(spain_data), cex.axis = 0.7, gap = 3)
+
+
+
+# Display the missing data pattern plot
+plot(md_pattern_plot_lund)
+plot(md_pattern_plot_spain)
+
+
+# Function to create a consistent missingness plot with genes ordered by missingness
+create_ordered_missingness_plot <- function(data, color = "red") {
+  # Calculate the proportion of missing values for each variable
+  missing_proportions <- colMeans(is.na(data))
+
+  # Order genes by missingness (highest missingness on the left)
+  ordered_data <- data[, order(missing_proportions, decreasing = TRUE)]
+
+  # Create a bar plot to display the proportions of missingness
+  barplot(missing_proportions[order(missing_proportions, decreasing = TRUE)], col = color,
+          main = "Lund Proportion of Missing Values per Protein", xlab = "Proteins",
+          ylab = "Proportion Missing", names.arg = colnames(ordered_data),
+          ylim = c(0, 1)) 
+}
+
+# Example usage with your dataset (replace 'lund_60_filtered' with your dataset name)
+create_ordered_missingness_plot(lund_data, color = "red")
+create_ordered_missingness_plot(spain_data, color = "red")
+
+# Overall missingness summary for spain_data
+spain_overall_missing <- naniar::miss_summary(spain_data)
+
+# Overall missingness summary for lund_data
+lund_overall_missing <- naniar::miss_summary(lund_data)
+
+# Overall missingness summary for spain_data
+# spain_overall_missing_60 <- naniar::miss_summary(spain_60_filtered)
+
+# Overall missingness summary for lund_data
+# lund_overall_missing_60 <- naniar::miss_summary(lund_60_filtered)
+
+# Print the result
+# cat("Number of columns with missing data: ", columns_with_missing_data, "\n")
+
+```
+
+
+#### 60% NA filtering
+
+```{r}
+# Filter out columns with more than 60% NA in Lund data
+lund_60_filtered <- lund_data %>%
+  select_if(~ mean(is.na(.)) < 0.6)
+
+# Filter out columns with more than 60% NA in Spain data
+spain_60_filtered <- spain_data %>%
+  select_if(~ mean(is.na(.)) < 0.6)
+
+# Filter out columns with more than 99% NA in Lund data
+lund_99_filtered <- lund_data %>%
+  select_if(~ mean(is.na(.)) < 0.99)
+
+# Filter out columns with more than 99% NA in Spain data
+spain_99_filtered <- spain_data %>%
+  select_if(~ mean(is.na(.)) < 0.99)
+
+```
+
+#### Arcsinh
+
+```{r}
+# Apply arcsinh transformation to Lund data
+lund_arcsinh <- lund_60_filtered %>%
+  apply(., 2, function(e) arcsinh_x(e, standardize = FALSE)$x.t)
+rownames(lund_60_filtered) <- lund_rownames
+
+# Apply arcsinh transformation to Spain data
+spain_arcsinh <- spain_60_filtered %>%
+  apply(., 2, function(e) arcsinh_x(e, standardize = FALSE)$x.t)
+rownames(spain_60_filtered) <- spain_rownames
+```
+
+#### Missing random forrest imputation
+
+```{r}
+# Impute missing values using missForest algorithm for Lund data
+lund_missfor <- lund_arcsinh %>%
+  missForest(., maxiter = 10, replace = TRUE, ntree = 100, variablewise = TRUE) %>%
+  `[[`(1) %>%
+  scale(.)
+
+# Impute missing values using missForest algorithm for Spain data
+spain_missfor <- spain_arcsinh %>%
+  missForest(., maxiter = 10, replace = TRUE, ntree = 100, variablewise = TRUE) %>%
+  `[[`(1) %>%
+  scale(.)
+
+
+lund_missfor_scaled <- scale(lund_missfor)
+spain_missfor_scaled <- scale(spain_missfor)
+
+par(mfrow = c(1, 2))
+boxplot(spain_missfor, main = "Processed Lund data", xlab = "Proteins",
+          ylab = "Proportion Abundance" )
+boxplot(lund_missfor, main = "Processed Lund data", xlab = "Proteins",
+          ylab = "Proportion Abundance")
+
+```
+
+#### Matching
+
+```{r}
+# Find matching rows in Lund and Spain data
+matching_rows <- intersect(rownames(lund_data), rownames(spain_data))
+
+# Subset the Spain data to match the rows
+spain_match <- subset(spain_missfor, rownames(spain_missfor) %in% matching_rows)
+spain_match <- spain_match[order(row.names(spain_match)), ]
+
+# Subset the Lund data to match the rows
+lund_match <- subset(lund_missfor, rownames(lund_missfor) %in% matching_rows)
+lund_match <- lund_match[order(matching_rows), ]
+lund_match <- lund_match[order(row.names(lund_match)), ]
+
+# Find columns with matching protein names
+protein_match <- intersect(colnames(lund_data), colnames(spain_data))
+```
+
+#### OmicsPLS
+
+```{r}
+# Perform cross-validation for OmicsPLS
+crossval_o2pls <- crossval_o2m_adjR2(as.matrix(scale(spain_match)), as.matrix(scale(lund_match)), 1:5, 0:5, 0:5, nr_folds = 5)
+o2pls <- OmicsPLS::o2m(as.matrix(scale(spain_match)), as.matrix(scale(lund_match)), 3, 1, 4)
+
+# Extract match groups
+match_groups <- rownames(spain_match) %>%
+  str_split("_") %>%
+  sapply(X = ., FUN = function(e) e[[2]])
+summary(o2pls)
+scores(o2pls)
+
+plot(data.frame(scores(o2pls, "Xj")), col = factor(match_groups))
+plot(data.frame(scores(o2pls, "Yj")), col = factor(match_groups))
+plot((scores(o2pls, "Xo")), col = factor(match_groups))
+plot(data.frame(scores(o2pls, "Yo")), col = factor(match_groups))
+
+loadings(o2pls, subset = 1, sorted = TRUE)[1:40] %>%
+  names() %>%
+  cat(sep = "\n")
+
+loadings <- loadings(o2pls, subset = 1, sorted = TRUE)[1:50] %>% names()
+length(intersect(protein_match, loadings))
+loadings
+plot(o2pls, label = "c", i = 1, j = 2)
+
+```
+
+### Overlap
+
+```{r}
+X1 <- scale(spain_match)
+X2 <- scale(lund_match)
+
+fit_o2m <- o2m(X1, X2, 3, 1, 4)
+summary(fit_o2m)
+
+# Prediction and row binding predicted values based on matching samples. See package information for fit_o2m items
+X1sep <- spain_missfor[!(rownames(spain_missfor) %in% matching_rows), ]
+X2sep <- lund_missfor[!(rownames(lund_missfor) %in% matching_rows), ]
+X1tot <- rbind(X1, X1sep, predict(fit_o2m, X2sep, "Y"))
+X2tot <- rbind(X2, predict(fit_o2m, X1sep, "X"), X2sep)
+
+X1tot_scores <- scale(X1tot %*% fit_o2m$W.)
+X2tot_scores <- scale(X2tot %*% fit_o2m$C.)
+```
+
+#### K-Means clustring
+
+```{r}
+# k-means clustering
+n_clusters <- 2
+n_iterations <- 100
+
+best_k_means <- function(data, n_iterations, n_clusters) {
+  k_clusters_list <- lapply(1:n_iterations, function(i) {
+    kmeans(data, centers = n_clusters, iter.max = i)
+  })
+
+  total_distances <- sapply(k_clusters_list, function(k_clusters) {
+    sum(k_clusters$withinss)
+  })
+
+  selected_cluster <- k_clusters_list[[which.min(total_distances)]]
+  best_cluster <- selected_cluster$cluster
+  return(selected_cluster)
+}
+
+best_cluster_X1 <- best_k_means(X1tot_scores, 100, 2) 
+best_cluster_X2 <- best_k_means(X2tot_scores, 100, 2)
+```
+
+
+#### Group coloring
+
+```{r}
+## Original character vector
+color_X1 <- rownames(X1tot)
+
+category_colors <- c("grey", "black", "green", "red", "blue")
+
+# Generate a new character vector
+color_X1 <- gsub(".*_", "", color_X1) # Remove everything before the "_"
+color_X1 <- gsub("NA", "1", color_X1) # Replace X with 0
+color_X1 <- gsub("P/S", "5", color_X1) # Replace P/S with 4
+color_X1 <- gsub("N", "2", color_X1) # Replace N with 1
+color_X1 <- gsub("S", "3", color_X1) # Replace S with 2
+color_X1 <- gsub("P", "4", color_X1) # Replace P with 3
+
+color_X1 <- as.numeric(color_X1)
+color_X1 <- category_colors[color_X1]
+
+plot(X1tot_scores, col = color_X1)
+
+# Original character vector
+color_X2 <- rownames(X2tot)
+length(color_X2)
+
+# Generate a new character vector
+color_X2 <- gsub(".*_", "", color_X2) # Remove everything before the "_"
+color_X2 <- gsub("NA", "1", color_X2) # Replace X with 0
+color_X2 <- gsub("P/S", "5", color_X2) # Replace P/S with 4
+color_X2 <- gsub("N", "2", color_X2) # Replace N with 1
+color_X2 <- gsub("S", "3", color_X2) # Replace S with 2
+color_X2 <- gsub("P", "4", color_X2) # Replace P with 3
+
+color_X2 <- as.numeric(color_X2)
+color_X2 <- category_colors[color_X2]
+
+plot(X2tot_scores, col = color_X1)
+
+colnames(X1tot_scores) <- c("Jc1", "Jc2", "Jc3")
+colnames(X2tot_scores) <- c("Jc1", "Jc2", "Jc3")
+
+plot(data.frame(X1tot_scores), col = color_X1, cex = 2, main = "X scores per Joint component")
+plot(data.frame(X2tot_scores), col = color_X2, cex = 2, main = "Y scores per Joint component")
+
+summary(lm(X1tot_scores[, 2] ~ color_X1))
+```
+
+#### Hierarchical clustering and plots
+
+```{r}
+## Plot lund scores
+plot(data.frame(X1tot_scores), cex = 2, col = best_cluster_X1$cluster, main = "X loading scores with k-means cluster")
+plot(data.frame(X2tot_scores), cex = 2, col = best_cluster_X2$cluster, main = "Y loading scores with X k-means cluster")
+```
+
+#### LDA
+
+```{r}
+#LDA fit of X1 clusters and scores
+fit_lda <- MASS::lda(X1tot_scores, best_cluster_X1$cluster)
+X1_ProtBetas <- loadings(fit_o2m, "Xj") %*% coef(fit_lda)
+
+#LDA fit of X2 clusters and scores
+X2_fit_lda <- MASS::lda(X2tot_scores, best_cluster_X1$cluster)
+X2_ProtBetas <- loadings(fit_o2m, "Yj") %*% coef(X2_fit_lda)
+
+plot(X1_ProtBetas[order(X1_ProtBetas^2, decreasing = TRUE)]^2, xlab = "Protein index", ylab = "Square Beta")
+plot(X2_ProtBetas[order(X2_ProtBetas^2, decreasing = TRUE)]^2)
+
+rownames(X1_ProtBetas)[order(X1_ProtBetas^2, decreasing = TRUE)[1:53]] %>% 
+  cat(sep = "\n")
+
+rownames(X2_ProtBetas)[order(X2_ProtBetas^2, decreasing = TRUE)[1:120]] %>% 
+  cat(sep = "\n")
+
+X1_ProtBetas_ord <- rownames(X1_ProtBetas)[order(X1_ProtBetas^2, decreasing = TRUE)]
+X1_ProtBetas <- X1_ProtBetas[X1_ProtBetas_ord, ]
+```
+
+
+#### Cross-validation
+
+```{r}
+crossval_match <- function(kcv) {
+  cv_groups <- cut(seq(1:17), breaks = kcv, labels = FALSE)
+  outp <- NA * 1:kcv
+  X1match <- X1tot[matching_rows, ]
+  X2match <- X2tot[matching_rows, ]
+
+  for (fold_ii in 1:kcv) {
+    test_ii <- which(cv_groups == fold_ii)
+    X1_test <- X1match[test_ii, ]
+    if (length(test_ii) == 1) X1_test <- t(X1_test)
+    X2_test <- as.matrix(X2match[test_ii, ])
+    if (length(test_ii) == 1) X2_test <- t(X2_test)
+    X1_train <- as.matrix(X1match[-test_ii, ])
+    X2_train <- as.matrix(X2match[-test_ii, ])
+
+    print(test_ii)
+    # print(str(X2_test))
+
+    fit <- o2m(scale(X1_train), scale(X2_train), 3, 1, 2)
+
+    X1_testscores <- X1_test %*% fit$W.
+    X2_testscores <- X2_test %*% fit$C.
+  }
+  return(outp)
+}
+crossval_match(5)
+
+```
+
+#### Cross-val
+
+```{r}
+# Cross validation by calculating RMSE of k-fold
+crossval_data_clustering <- function(x, y, kcv, n, nx, ny) {
+  x <- as.matrix(x)
+  y <- as.matrix(y)
+  
+  total_x_rmse_train <- 0
+  total_y_rmse_train <- 0
+  total_x_rmse_test <- 0
+  total_y_rmse_test <- 0
+  
+  matching_rows <- intersect(rownames(x), rownames(y))
+  X_match <- scale(x[matching_rows, ])
+  Y_match <- scale(y[matching_rows, ])
+  X_sep <- x[!(rownames(x) %in% matching_rows), ]
+  Y_sep <- y[!(rownames(y) %in% matching_rows), ]
+
+  all_fit <- o2m(X_match, Y_match, n, nx, ny)
+  all_rmse_Y <- sqrt(mean((all_fit$Y_hat - Y_match)^2))
+  all_rmse_X <- sqrt(mean((all_fit$X_hat - X_match)^2))
+
+  print(paste("The RMSE of the predicted Y training on all data is: ", all_rmse_Y))
+  print(paste("The RMSE of the predicted X training on all data is: ", all_rmse_X))
+
+  cv_groups_match <- cut(seq(1:length(matching_rows)), breaks = kcv, labels = FALSE)
+  cv_groups_X <- cut(seq(1:length(rownames(X_sep))), breaks = kcv, labels = FALSE)
+  cv_groups_Y <- cut(seq(1:length(rownames(Y_sep))), breaks = kcv, labels = FALSE)
+
+  test_clusters <- list()
+
+  for (fold_ii in 1:kcv) {
+    test_fold_X <- which(cv_groups_X == fold_ii)
+    test_fold_Y <- which(cv_groups_Y == fold_ii)
+    test_fold_match <- which(cv_groups_match == fold_ii)
+
+    X_test_match <- X_match[test_fold_match, ]
+    Y_test_match <- Y_match[test_fold_match, ]
+    X_test <- X_sep[test_fold_X, ]
+    Y_test <- Y_sep[test_fold_Y, ]
+
+    X_train_match <- X_match[-test_fold_match, ]
+    Y_train_match <- Y_match[-test_fold_match, ]
+    X_train <- X_sep[-test_fold_X, ]
+    Y_train <- Y_sep[-test_fold_Y, ]
+
+    fit_o2m <- o2m(scale(X_train_match), scale(Y_train_match), n, nx, ny)
+    Yhat <- X_test_match %*% fit_o2m$W. %*% fit_o2m$B_T %*% t(fit_o2m$C.)
+    Xhat <- Y_test_match %*% fit_o2m$C. %*% fit_o2m$B_U %*% t(fit_o2m$W.)
+
+    rmse_Y_test <- sqrt(mean((Yhat - Y_test_match)^2))
+    rmse_X_test <- sqrt(mean((Xhat - X_test_match)^2))
+    # rmse_X_test <- sqrt(mean((Xhat - X_test_match)^2))/sqrt(mean(scale(X_test_match, center = T, scale = F)^2))
+    
+    org_rmse_Y <- sqrt(mean((all_fit$Y_hat[-test_fold_match, ] - Y_match[-test_fold_match, ])^2))
+    print(org_rmse_Y)
+    org_rmse_X <- sqrt(mean((all_fit$X_hat[-test_fold_match, ] - X_match[-test_fold_match, ])^2))
+    print(org_rmse_X)
+    
+    print(paste("The RMSE of the predicted test Y in k", fold_ii, "is: ", rmse_Y_test))
+    print(paste("The RMSE of the predicted test X in k", fold_ii, "is: ", rmse_X_test))
+
+    X_predict <- rbind(X_match, X_sep, predict(fit_o2m, Y_sep, "Y"))
+    Y_predict <- rbind(Y_match, predict(fit_o2m, X_sep, "X"), Y_sep)
+
+    X_predict_scores <- scale(X_predict %*% fit_o2m$W.)
+    Y_predict_scores <- scale(Y_predict %*% fit_o2m$C.)
+
+    X_test_scores <- scale(X_test %*% fit_o2m$W.)
+    Y_test_scores <- scale(Y_test %*% fit_o2m$C.)
+    
+    total_x_rmse_train <- sum(total_x_rmse_train, org_rmse_Y)
+    total_y_rmse_train <- sum(total_y_rmse_train, org_rmse_X)
+    total_x_rmse_test <- sum(total_x_rmse_test, rmse_X_test)
+    total_y_rmse_test <- sum(total_y_rmse_test, rmse_Y_test)
+    
+    plot(X_predict_scores, col = best_cluster_X1$cluster)
+    plot(Y_predict_scores, col = best_cluster_X2$cluster)
+  }
+  mean_x_rmse_train <- total_x_rmse_train/kcv
+  mean_y_rmse_train <- total_y_rmse_train/kcv
+  mean_x_rmse_test <- total_x_rmse_test/kcv
+  mean_y_rmse_test <- total_y_rmse_test/kcv
+  
+  print(paste("The RMSE of the full model prediction of the X test set is: ",  mean_x_rmse_train))
+  print(paste("The RMSE of the full model prediction of the Y test set is: ",  mean_y_rmse_train))
+  print(paste("The RMSE of the predicted X test set based on the k-fold training dataset is: ",  mean_x_rmse_test))
+  print(paste("The RMSE of the predicted Y test based on the k-fold training dataset set is: ",  mean_y_rmse_test))
+  return(all_rmse_Y)
+}
+
+crossval_k <- crossval_data_clustering(spain_missfor, lund_missfor, 5, 3, 1, 4)
+```
+
+#### Clinical analysis
+
+```{r}
+rownames(X1tot_scores)[!(rownames(X1tot_scores) %in% clinical_data$Merge)] #### 10240_S missing phenotype in clinical data but S in spain_data
+
+matching_rows2 <- match(rownames(X1tot_scores), clinical_data$Merge)
+remove_ii <- which(rownames(X1tot_scores) == "10240_S")
+
+
+sex_values <- clinical_data$Sex[matching_rows[!is.na(matching_rows)]]
+sex_numeric <- ifelse(sex_values == "Female", 0, 1)
+bmi_values <- clinical_data$BMI[matching_rows2[!is.na(matching_rows2)]]
+age_values <- clinical_data$Age[matching_rows2[!is.na(matching_rows2)]]
+minjsw <- clinical_data$minJSW_regr[matching_rows2[!is.na(matching_rows2)]]
+
+# filtered_clust <- best_k_means(filtered_data, 100)
+# boxplot(filtered_data[, 1] ~ sex_values, xlab = "Sex", ylab = "Values", main = "Boxplot by Sex")
+# plot(x = filtered_data[, 1], bmi_values)
+# summary(lm(bmi / sex / age ~ cluster_col))
+```
